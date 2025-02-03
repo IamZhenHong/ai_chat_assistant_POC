@@ -4,13 +4,19 @@ FROM python:3.12-slim
 # Set the working directory in the container
 WORKDIR /app
 
-# Copy the current directory contents into the container at /app
-COPY . /app
+# Install system dependencies needed for psycopg2 and general compilation
+RUN apt-get update && apt-get install -y \
+    libpq-dev gcc python3-dev build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install any needed packages specified in requirements.txt
+# Copy and install dependencies separately to leverage Docker cache
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Make port 8000 available to the world outside this container
+# Copy the rest of the application code
+COPY . /app
+
+# Expose FastAPI port
 EXPOSE 8000
 
 # Define environment variable (corrected format)
