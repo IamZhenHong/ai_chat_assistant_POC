@@ -5,3 +5,4 @@ pydantic
 openai
 python-dotenv
 psycopg2==2.9.10
+supabase

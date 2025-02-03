@@ -34,7 +34,7 @@ password = os.environ.get("SUPABASE_PASSWORD")
 encoded_password = urllib.parse.quote(password, safe="")
 
 # ✅ Construct SQLAlchemy connection URL
-DATABASE_URL = f"postgresql://postgres:{encoded_password}@{host}:{port}/postgres"
+DATABASE_URL = f"postgresql+psycopg2://postgres:{encoded_password}@{host}:{port}/postgres"
 
 # ✅ Create SQLAlchemy engine
 engine = create_engine(DATABASE_URL, echo=True)
