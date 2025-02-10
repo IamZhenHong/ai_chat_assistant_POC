@@ -14,6 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import urllib.parse
+import psycopg2
 # Load environment variables
 load_dotenv()
 
@@ -34,9 +35,7 @@ password = os.environ.get("SUPABASE_PASSWORD")
 encoded_password = urllib.parse.quote(password, safe="")
 
 # ✅ Construct SQLAlchemy connection URL
-DATABASE_URL = f"postgresql+psycopg2://postgres:{encoded_password}@{host}:{port}/postgres"
-
-# ✅ Create SQLAlchemy engine
+DATABASE_URL = f"postgresql://postgres.rgwighbhilwimfpmrcak:{encoded_password}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
 engine = create_engine(DATABASE_URL, echo=True)
 
 try:
@@ -51,7 +50,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 Base.metadata.create_all(bind=engine)
-
 
 app = FastAPI()
 
@@ -83,6 +81,26 @@ def update_target(target_id: uuid.UUID, updated_target: schemas.TargetCreate):
     )
 
     return response.data[0]
+
+# ✅ Add Conversation Snippet (Supabase)
+@app.post("/conversation_snippets/", response_model=schemas.ConversationSnippetOut)
+def create_conversation_snippet(conversation_snippet: schemas.ConversationSnippetCreate):
+    # ✅ Validate `target_id`
+    if not conversation_snippet.target_id:
+        raise HTTPException(status_code=400, detail="❌ Target ID is required.")
+
+    # ✅ Insert conversation snippet with error handling
+    try:
+        convo_snippet = {
+            "id": str(uuid.uuid4()),
+            "content": conversation_snippet.convo,
+            "target_id": str(conversation_snippet.target_id),
+        }
+        supabase.table("conversation_snippets").insert(convo_snippet).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"❌ Database error inserting conversation snippet: {str(e)}")
+
+    return convo_snippet
 
 @app.post("/persona/", response_model=schemas.PersonaOut)
 def create_persona(persona: schemas.PersonaCreate):
@@ -225,6 +243,7 @@ def create_chat_strategy(chat_strategy: schemas.ChatStrategyCreate):
     latest_convo = (
         supabase.table("conversation_snippets")
         .select("content")
+        .eq("target_id", str(chat_strategy.target_id))
         .order("created_at", desc=True)
         .limit(1)
         .execute()
@@ -233,6 +252,7 @@ def create_chat_strategy(chat_strategy: schemas.ChatStrategyCreate):
     latest_chat_strategy = (
         supabase.table("chat_strategies")
         .select("content")
+        .eq("target_id", str(chat_strategy.target_id))
         .order("created_at", desc=True)
         .limit(1)
         .execute()
@@ -344,6 +364,8 @@ def create_reply_options_flow(reply_options: schemas.ReplyOptionsCreate):
     - Context: {target.get('name', 'Unknown')}, {target.get('personality', 'Unknown')}
     - Persona: {persona_data[0].get('name', 'Unknown')}, {persona_data[0].get('description', 'Unknown')}
     """
+
+    print(system_prompt)
 
     try:
         completion = client.beta.chat.completions.parse(

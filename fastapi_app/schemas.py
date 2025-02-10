@@ -13,6 +13,15 @@ class LoveAnalysisOut(BaseModel):
     class Config:
         from_attributes = True
 
+class ConversationSnippetCreate(BaseModel):
+    convo: str
+    target_id: uuid.UUID  # Changed from int to UUID
+
+class ConversationSnippetOut(BaseModel):
+    content: str
+
+    class Config:
+        from_attributes = True
 class PersonaCreate(BaseModel):
     name : str
     description : str
