@@ -15,6 +15,13 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import urllib.parse
 import psycopg2
+from datetime import datetime
+import uvicorn
+from celery import Celery
+import time
+from fastapi import FastAPI, BackgroundTasks
+from celery.result import AsyncResult
+from .worker import summarize_conversation, update_relationship_overview, update_user_texting_style
 # Load environment variables
 load_dotenv()
 
@@ -51,56 +58,180 @@ Base = declarative_base()
 
 Base.metadata.create_all(bind=engine)
 
+# Celery setup with Redis
+celery_app = Celery(
+    "worker",
+    broker="redis://localhost:6379/0",  # Redis as the message broker
+    backend="redis://localhost:6379/0",  # Redis to store results
+)
+
 app = FastAPI()
 
-# ✅ Create Target (Supabase)
-@app.post("/targets/", response_model=schemas.TargetOut)
-def create_target(target: schemas.TargetCreate):
-    target_data = target.dict()
-    target_data["id"] = str(uuid.uuid4())  # Generate UUID
+@app.post("/users/", response_model=schemas.UserOut)
+def create_user(user: schemas.UserCreate):
+    user_data = user.dict()
+    user_data["id"] = str(uuid.uuid4())  # Generate UUID
 
-    response = supabase.table("targets").insert(target_data).execute()
+    response = supabase.table("users").insert(user_data).execute()
 
     return response.data[0]
 
-# ✅ Get All Targets (Supabase)
-@app.get("/targets/", response_model=List[schemas.TargetOut])
-def get_all_targets():
-    response = supabase.table("targets").select("*").execute()
+@app.get("/users/", response_model=List[schemas.UserOut])
+def get_all_users():
+    response = supabase.table("users").select("*").execute()
 
     return response.data
 
-# ✅ Update Target (Supabase)
-@app.put("/targets/{target_id}", response_model=schemas.TargetOut)
-def update_target(target_id: uuid.UUID, updated_target: schemas.TargetCreate):
+@app.put("/users/{user_id}", response_model=schemas.UserUpdateOut)
+def update_user(user_id: uuid.UUID, updated_user: schemas.UserUpdate):
+    user_id_str = str(user_id)
+
     response = (
-    supabase.table("targets")
-    .update(updated_target.dict())
-    .eq("id", str(target_id))  # ✅ Convert to string
-    .execute()
+        supabase.table("users")
+        .update(updated_user.dict())
+        .eq("id", user_id_str)
+        .execute()
     )
+
+    if not response.data:
+        raise HTTPException(status_code=404, detail="User not found or no changes made.")
 
     return response.data[0]
 
+# ✅ Create Target (Supabase)
+@app.post("/recipients/", response_model=schemas.RecipientOut)
+def create_recipient(target: schemas.RecipientCreate):
+    recipient_data = target.dict()
+    recipient_data["id"] = str(uuid.uuid4())  # Generate UUID
+    recipient_data["user_id"] = str(target.user_id)  # Convert to string
+    # recipient_data["relationship_id"] = str(uuid.uuid4())  # Generate Relationship UUID
+
+    # ✅ Insert recipient first
+    response = supabase.table("recipients").insert(recipient_data).execute()
+    if not response.data:
+        raise HTTPException(status_code=500, detail="❌ Failed to create recipient.")
+    new_recipient = response.data[0]
+    relationship_id = str(uuid.uuid4())
+    # ✅ Create a new relationship object
+    relationship_data = {
+        "id": relationship_id,
+        "user_id": str(target.user_id),
+        "recipient_id": new_recipient["id"],
+        "relationship_stage_overview": "New Connection",
+        "relationship_goal": "",
+        "user_personality_overview": "",
+        "user_communication_style_overview": "",
+        "recipient_personality_overview": "",
+        "recipient_communication_style_overview": "",
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "language": new_recipient.get("language"),
+    }
+
+    # ✅ Insert relationship
+    relationship_response = supabase.table("relationships").insert(relationship_data).execute()
+    if not relationship_response.data:
+        raise HTTPException(status_code=500, detail="❌ Failed to create relationship.")
+    
+    update_recipient_data = {
+        "relationship_id": relationship_id
+    }
+    # ✅ Update recipient with relationship_id
+    response = (
+        supabase.table("recipients")
+        .update(update_recipient_data)
+        .eq("id", new_recipient["id"])
+        .execute()
+    )
+    
+    return {
+        "id": new_recipient["id"],
+        "user_id": new_recipient["user_id"],
+        "name": new_recipient["name"],
+        "gender": new_recipient.get("gender"),
+        "language": new_recipient.get("language"),
+        "age": new_recipient.get("age"),
+        "about_me": new_recipient.get("about_me"),
+        "relationship_id": relationship_data["id"],
+    }
+
+
+# ✅ Get All Recipients for a Specific User
+@app.get("/recipients/{user_id}", response_model=List[schemas.RecipientOut])
+def get_all_recipients(user_id: uuid.UUID):
+    response = (
+        supabase.table("recipients")
+        .select("*")
+        .eq("user_id", str(user_id))  # Ensure it's properly converted to a string
+        .execute()
+    )
+
+    return response.data if response.data else []
+
+# ✅ Update Target (Supabase)
+@app.put("/recipients/{recipient_id}", response_model=schemas.RecipientUpdateOut)
+def update_recipient(recipient_id: uuid.UUID, updated_recipient: schemas.RecipientUpdate):
+    # Convert recipient_id to string for Supabase
+    recipient_id_str = str(recipient_id)
+
+    response = (
+        supabase.table("recipients")
+        .update(updated_recipient.dict())
+        .eq("id", recipient_id_str)
+        .execute()
+    )
+
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Recipient not found or no changes made.")
+
+    return response.data[0]  # Ensure returning a single object, not a list
+
+
 # ✅ Add Conversation Snippet (Supabase)
 @app.post("/conversation_snippets/", response_model=schemas.ConversationSnippetOut)
-def create_conversation_snippet(conversation_snippet: schemas.ConversationSnippetCreate):
-    # ✅ Validate `target_id`
-    if not conversation_snippet.target_id:
-        raise HTTPException(status_code=400, detail="❌ Target ID is required.")
+def create_conversation_snippets(conversation_snippets: List[schemas.ConversationSnippetCreate]):
+    if not conversation_snippets:
+        raise HTTPException(status_code=400, detail="❌ No snippets provided.")
+    conversation_id = str(uuid.uuid4())
 
-    # ✅ Insert conversation snippet with error handling
-    try:
-        convo_snippet = {
+    conversation_history = ""
+    for snippet in conversation_snippets:
+        conversation_history += f"{snippet.content}\n"
+
+
+    new_conversation = {
+        "id": conversation_id,
+        "relationship_id": str(conversation_snippets[0].relationship_id),
+        "topic": "New Conversation",
+        "conversation_history": conversation_history,
+        "conversation_summary": "",
+        "last_updated": datetime.utcnow().isoformat(),
+    }
+    print("conversation_id", conversation_id)
+    supabase.table("conversations").insert(new_conversation).execute()
+
+    summary = summarize_conversation.apply_async(args=[conversation_history, conversation_id], countdown=10)
+    update_user_texting_style.apply_async(args=[conversation_history,conversation_snippets[0].relationship_id], countdown=10)
+
+    # ✅ Insert multiple snippets under the conversation
+    snippets_data = []
+    for snippet in conversation_snippets:
+        snippets_data.append({
             "id": str(uuid.uuid4()),
-            "content": conversation_snippet.convo,
-            "target_id": str(conversation_snippet.target_id),
-        }
-        supabase.table("conversation_snippets").insert(convo_snippet).execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"❌ Database error inserting conversation snippet: {str(e)}")
+            "conversation_id": conversation_id,
+            "sequence_id": snippet.sequence_id,
+            "content": snippet.content,
+            "image_url": snippet.image_url,
+            "uploaded_at": datetime.utcnow().isoformat(),
+        })
+    
+    response = supabase.table("conversation_snippets").insert(snippets_data).execute()
+    if not response.data:
+        raise HTTPException(status_code=500, detail="❌ Failed to insert conversation snippets.")
 
-    return convo_snippet
+    return {
+        "conversation_id": conversation_id,
+    }
 
 @app.post("/persona/", response_model=schemas.PersonaOut)
 def create_persona(persona: schemas.PersonaCreate):
@@ -123,249 +254,50 @@ def get_all_personas():
 
     return response.data
 
-
-@app.post("/love_analysis/", response_model=schemas.LoveAnalysisOut)
-def create_love_analysis(love_analysis: schemas.LoveAnalysisCreate):
-    # ✅ Validate `target_id`
-    if not love_analysis.target_id:
-        raise HTTPException(status_code=400, detail="❌ Target ID is required.")
-
-    # ✅ Insert conversation snippet with error handling
-    try:
-        convo_snippet = {
-            "id": str(uuid.uuid4()),
-            "content": love_analysis.convo,
-            "target_id": str(love_analysis.target_id),
-        }
-        supabase.table("conversation_snippets").insert(convo_snippet).execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"❌ Database error inserting conversation snippet: {str(e)}")
-
-    # ✅ Fetch target and check if exists
-    target_data = (
-        supabase.table("targets")
+@app.post("/conversation_analysis/", response_model=schemas.ConversationAnalysisOut)
+def create_conversation_analysis(conversation_analysis: schemas.ConversationAnalysisCreate):
+    if not conversation_analysis.conversation_id:
+        raise HTTPException(status_code=400, detail="Conversation ID is required")
+    
+    relationship_data = (
+        supabase.table("relationships")
         .select("*")
-        .eq("id", str(love_analysis.target_id))
+        .eq("id", str(conversation_analysis.relationship_id))
+        .execute()
+    ).data
+    
+    conversation_history = (
+        supabase.table("conversations")
+        .select("conversation_history")
+        .eq("id", str(conversation_analysis.conversation_id))
         .execute()
     ).data
 
-    if not target_data:
-        raise HTTPException(status_code=404, detail="❌ Target not found")
-
-    target = target_data[0]  # ✅ Extract first result safely
-
-    # ✅ Fetch previous analysis (handle missing data)
-    prev_analysis_data = (
-        supabase.table("love_analysis")
-        .select("content")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    ).data
-    prev_content = prev_analysis_data[0]["content"] if prev_analysis_data else "No previous analysis available."
-
-    # ✅ System prompt for GPT-4o
-    prompt = f"""
-    You are a love coach who is very good at analyzing the relationship dynamics, personalities, and latent feelings of both parties. I'm your client seeking your advice. 
-    ###
-    Analyze the previous love analysis content and chat history provided, and output the following analysis:
-    1. General relationship dynamic
-    2. How I present myself in front of the other party
-    3. How the other party most likely sees me and feels about me
-    4. What the other party most likely needs from our interaction or relationship
-    5. My personalities shown in the conversation
-    6. The other party's personality shown in the conversation
-    7. What the other party is likely to do next in our interactions
-    8. Overall advice if I want to achieve my relationship goals
-    9. How have the relationship dynamics changed since the last conversation
-    ###
-    Previous Love Analysis:
-    {prev_content}
-
-    Current Conversation:
-    {love_analysis.convo}
-
-    New Love Analysis:
-    """
-
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o",
-            store=True,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"""Output in {target.get('language', 'English')}: """},
-            ],
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"❌ GPT-4o API error: {str(e)}")
-
-    # ✅ Ensure GPT response is valid
-    if not completion.choices or not completion.choices[0].message.content:
-        raise HTTPException(status_code=500, detail="❌ GPT-4o returned an empty response")
-
-    analysis_content = completion.choices[0].message.content
-
-    # ✅ Insert new analysis with error handling
-    new_analysis = {
-        "id": str(uuid.uuid4()),
-        "convo": love_analysis.convo,
-        "content": analysis_content,
-        "target_id": str(love_analysis.target_id),
-    }
-
-    try:
-        supabase.table("love_analysis").insert(new_analysis).execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"❌ Database error inserting love analysis: {str(e)}")
-
-    # ✅ Return response
-    return schemas.LoveAnalysisOut(content=analysis_content)
-
-# ✅ Create Chat Strategy (Supabase)
-@app.post("/chat_strategies/", response_model=schemas.ChatStrategyOut)
-def create_chat_strategy(chat_strategy: schemas.ChatStrategyCreate):
-    target = (
-        supabase.table("targets")
-        .select("*")
-        .eq("id", str(chat_strategy.target_id))
-        .execute()
-    ).data[0]
-
-    latest_love_analysis = (
-        supabase.table("love_analysis")
-        .select("content")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    ).data
-
-    latest_convo = (
-        supabase.table("conversation_snippets")
-        .select("content")
-        .eq("target_id", str(chat_strategy.target_id))
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    ).data
-
-    latest_chat_strategy = (
-        supabase.table("chat_strategies")
-        .select("content")
-        .eq("target_id", str(chat_strategy.target_id))
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    ).data
-
+    if not conversation_history:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    if not relationship_data:
+        raise HTTPException(status_code=404, detail="Relationship not found")
+    
+    recipient_personality = relationship_data[0].get("recipient_personality_overview", "Unknown")
+    recipient_communication_style = relationship_data[0].get("recipient_communication_style_overview", "Unknown")
 
     system_prompt = f"""
-        You are a love coach who is very good at helping clients come up with the right strategy and exact reply in communication to reach their short-term and long-term relationship goals. I'm your client seeking your advice.
+    Analyze the conversation based on:
+    - Relationship Goal: {relationship_data[0].get('relationship_goal', 'Unknown')}
+    - Recipient Personality: {recipient_personality}
+    - Recipient Communication Style: {recipient_communication_style}
+    - Conversation History: {conversation_history[0].get('conversation_history', 'Unknown')}
 
-        Come up with a communication strategy that is brief, easy to follow, and actionable for me to talk to {target["name"]} based on the context below.
-        Output in {target["language"]}:
-        Context: 
-        """
-    system_prompt += f"""
-        my gender: {target["gender"]}
-        I'm talking to {target["name"]} online
-        {target["name"]}'s gender: {target["gender"]}
-        {target["name"]}'s personality: {target["personality"]}
-        relationship context: {target["relationship_context"]}
-        my feelings about our relationship: {target["relationship_perception"]}
-        my short-term goal with {target["name"]}: {target["relationship_goals"]}
-        my long-term goal with {target["name"]}: {target["relationship_goals_long"]}
-        relationship dynamics:
-        {latest_love_analysis}
-        Last conversation snippet: {latest_convo}
-        Last chat strategy: {latest_chat_strategy}
-        """
+    Be comprehensive and detailed
+    """
 
-
-    completion = client.chat.completions.create(
-        model="gpt-4o",
-        store=True,
-        messages=[{"role": "system", "content": system_prompt}],
+    recipient_language = (
+        supabase.table("recipients")
+        .select("language")
+        .eq("id", relationship_data[0].get("recipient_id"))
+        .execute()
     )
-    chat_strategy_content = completion.choices[0].message.content
-
-    new_strategy = {
-        "id": str(uuid.uuid4()),
-        "convo": latest_convo[0]['content'] if latest_convo else 'None',
-        "love_analysis": latest_love_analysis[0]['content'] if latest_love_analysis else 'None',
-        "content": chat_strategy_content,
-        "target_id": str(chat_strategy.target_id),
-    }
-    supabase.table("chat_strategies").insert(new_strategy).execute()
-
-    return new_strategy
-
-from fastapi import HTTPException
-
-@app.post("/reply_options_flow/", response_model=schemas.ReplyOptionsOut)
-def create_reply_options_flow(reply_options: schemas.ReplyOptionsCreate):
-    # ✅ Validate `target_id`
-    if not reply_options.target_id:
-        raise HTTPException(status_code=400, detail="❌ target_id is required")
-    
-    if not reply_options.persona_id:
-        raise HTTPException(status_code=400, detail="❌ persona_id is required")
-
-    # ✅ Fetch target & check if exists
-    target_data = (
-        supabase.table("targets")
-        .select("*")
-        .eq("id", str(reply_options.target_id))
-        .execute()
-    ).data
-
-    persona_data = (
-        supabase.table("personas")
-        .select("*")
-        .eq("id", str(reply_options.persona_id))
-        .execute()
-    ).data
-
-    if not persona_data:
-        raise HTTPException(status_code=404, detail="❌ Persona not found")
-
-    if not target_data:
-        raise HTTPException(status_code=404, detail="❌ Target not found")
-
-    target = target_data[0]  # ✅ Extract first result
-
-    # ✅ Fetch latest conversation snippet (handle missing data)
-    latest_convo_data = (
-    supabase.table("conversation_snippets")
-    .select("content")
-    .eq("target_id", reply_options.target_id)  # Only get rows where target_id matches
-    .order("created_at", desc=True)
-    .limit(1)
-    .execute()
-).data
-    
-    latest_convo = latest_convo_data[0]['content'] if latest_convo_data else "No recent conversation."
-
-    # ✅ Fetch latest chat strategy (handle missing data)
-    latest_chat_strategy_data = (
-        supabase.table("chat_strategies")
-        .select("content")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    ).data
-    latest_chat_strategy = latest_chat_strategy_data[0]['content'] if latest_chat_strategy_data else "No chat strategy available."
-
-    # ✅ System prompt with error handling
-    system_prompt = f"""
-    Generate 4 response options based on:
-    - Last conversation: {latest_convo}
-    - Chat strategy: {latest_chat_strategy}
-    - Context: {target.get('name', 'Unknown')}, {target.get('personality', 'Unknown')}
-    - Persona: {persona_data[0].get('name', 'Unknown')}, {persona_data[0].get('description', 'Unknown')}
-    """
-
-    print(system_prompt)
 
     try:
         completion = client.beta.chat.completions.parse(
@@ -373,46 +305,194 @@ def create_reply_options_flow(reply_options: schemas.ReplyOptionsCreate):
             store=True,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content":f"""Output in {target.get('language', 'English')}: """},
-                ],
-            response_format = schemas.ReplyOptionsOut
+                {"role": "user", "content": f"""Output in {recipient_language}: """},
+            ],
+            response_format=schemas.ConversationAnalysisOut
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ GPT-4o API error: {str(e)}")
 
-    # ✅ Ensure GPT response is valid
-    if not completion.choices or not completion.choices[0].message.content:
-        raise HTTPException(status_code=500, detail="❌ GPT-4o returned an empty response")
+    analysis_results = completion.choices[0].message.parsed
 
-    options = completion.choices[0].message.parsed
-    print(options)
-    print("option1",options.option1)
-    print("option2",options.option2)
-    print("option3",options.option3)
-    # ✅ Ensure at least 4 options are available
-
-    # ✅ Create new reply options entry
-    new_reply_options_flow = {
+    new_conversation_analysis = {
         "id": str(uuid.uuid4()),
-        "convo": latest_convo,
-        "chat_strategy": latest_chat_strategy,
-        "option1": options.option1,
-        "option2": options.option2,
-        "option3": options.option3,
-        "option4": options.option4,
-        "target_id": str(reply_options.target_id),
+        "conversation_id": str(conversation_analysis.conversation_id),
+        "user_communication_style": analysis_results.user_communication_style,
+        "user_personality": analysis_results.user_personality,
+        "recipient_communication_style": analysis_results.recipient_communication_style,
+        "recipient_personality": analysis_results.recipient_personality,
+        "relationship_stage": analysis_results.relationship_stage,
+        "relationship_trend": analysis_results.relationship_trend,
+        "generated_at": datetime.utcnow().isoformat(),
     }
+
+    conversation_analysis_update = {
+        "relationship_id": str(conversation_analysis.relationship_id),
+        "relationship_stage": analysis_results.relationship_stage,
+        "relationship_trend": analysis_results.relationship_trend,
+        "user_personality": analysis_results.user_personality,
+        "user_communication_style": analysis_results.user_communication_style,
+        "recipient_personality": analysis_results.recipient_personality,
+        "recipient_communication_style": analysis_results.recipient_communication_style,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+    update_relationship_overview.apply_async(args=[conversation_analysis_update], countdown=10)
+    response = supabase.table("conversation_analyses").insert(new_conversation_analysis).execute()
+
+    return schemas.ConversationAnalysisOut(
+        user_communication_style=analysis_results.user_communication_style,
+        user_personality=analysis_results.user_personality,
+        recipient_communication_style=analysis_results.recipient_communication_style,
+        recipient_personality=analysis_results.recipient_personality,
+        relationship_stage=analysis_results.relationship_stage,
+        relationship_trend=analysis_results.relationship_trend,
+    )
+from fastapi import HTTPException
+import uuid
+from datetime import datetime
+import os
+
+@app.post("/reply_suggestions/", response_model=schemas.ReplySuggestionOut)
+def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
+    """Generates AI-powered reply suggestions based on conversation context and persona."""
+
+    print(f"🔹 Received request: {reply_suggestion.dict()}")
+
+    # ✅ Validate required fields
+    if not reply_suggestion.conversation_id:
+        raise HTTPException(status_code=400, detail="❌ conversation_id is required")
+    if not reply_suggestion.persona_id:
+        raise HTTPException(status_code=400, detail="❌ persona_id is required")
+
+    # ✅ Fetch relationship data
+    print(f"🔹 Fetching relationship data for ID: {reply_suggestion.relationship_id}")
+    relationship_data = (
+        supabase.table("relationships")
+        .select("*")
+        .eq("id", str(reply_suggestion.relationship_id))
+        .execute()
+    ).data
+
+    if not relationship_data:
+        raise HTTPException(status_code=404, detail="❌ Relationship not found")
+
+    relationship = relationship_data[0]
+    print("✅ Relationship data found")
+
+    # ✅ Determine user texting style
+    if reply_suggestion.option == 1:
+        user_texting_style = relationship.get("user_texting_style", "Normal")
+    elif reply_suggestion.option == 2:
+        print(f"🔹 Fetching persona data for ID: {reply_suggestion.persona_id}")
+        persona_data = (
+            supabase.table("personas")
+            .select("*")
+            .eq("id", str(reply_suggestion.persona_id))
+            .execute()
+        ).data
+
+        if not persona_data:
+            raise HTTPException(status_code=404, detail="❌ Persona not found")
+
+        user_texting_style = persona_data[0].get("description", "Normal")
+    else:
+        user_texting_style = "Normal"
+
+    print(f"✅ Determined user texting style: {user_texting_style}")
+
+    # ✅ Fetch conversation data
+    print(f"🔹 Fetching conversation data for ID: {reply_suggestion.conversation_id}")
+    conversation_data = (
+        supabase.table("conversations")
+        .select("*")
+        .eq("id", str(reply_suggestion.conversation_id))
+        .execute()
+    ).data
+
+    if not conversation_data:
+        raise HTTPException(status_code=404, detail="❌ Conversation not found")
+
+    conversation = conversation_data[0]
+
+    print("✅ Conversation data found")
+
+    # ✅ Construct System Prompt
+    system_prompt = f"""
+    Suggest replies based on:
+    - Relationship Goal: {relationship.get('relationship_goal', 'Unknown')}
+    - Recipient Personality: {relationship.get('recipient_personality_overview', 'Unknown')}
+    - Recipient Communication Style: {relationship.get('recipient_communication_style_overview', 'Unknown')}
+    - Conversation History: {conversation.get('conversation_history', 'Unknown')}
+    - User Texting Style: {user_texting_style}
+
+    """
+
+    print("🔹 Sending request to OpenAI with prompt...")
+
+
+
+    try:
+        completion = client.beta.chat.completions.parse(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Output in {relationship.get('language', 'English')}: "},
+            ],
+            response_format= schemas.ReplySuggestionOut
+        )
+        print("✅ OpenAI response received")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"❌ GPT-4o API error: {str(e)}")
+
+    # ✅ Ensure OpenAI response is valid
+    
+    options = completion.choices[0].message.parsed
+
+    print(f"✅ Parsed reply suggestions: {options}")
+
+    # ✅ Prepare new reply suggestion entry
+    new_reply_suggestion = {
+        "id": str(uuid.uuid4()),
+        "conversation_id": str(reply_suggestion.conversation_id),
+        "persona_id": str(reply_suggestion.persona_id),
+        "reply_1": options.reply_1,
+        "reply_2": options.reply_2,
+        "reply_3": options.reply_3,
+        "reply_4": options.reply_4,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+    print(f"🔹 Inserting reply suggestion into Supabase: {new_reply_suggestion}")
 
     # ✅ Insert into Supabase with error handling
     try:
-        supabase.table("reply_options_flows").insert(new_reply_options_flow).execute()
+        response = supabase.table("reply_suggestions").insert(new_reply_suggestion).execute()
+        print("✅ Supabase insertion successful")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ Database error: {str(e)}")
 
     # ✅ Return response
-    return schemas.ReplyOptionsOut(
-        option1=options.option1,
-        option2=options.option2,
-        option3=options.option3,
-        option4=options.option4,
+    return schemas.ReplySuggestionOut(
+        reply_1=options.reply_1,
+        reply_2=options.reply_2,
+        reply_3=options.reply_3,
+        reply_4=options.reply_4,
     )
+
+@app.get("/user_texting_style/{relationship_id}")
+def get_user_texting_style(relationship_id: uuid.UUID):
+    relationship_data = (
+        supabase.table("relationships")
+        .select("*")
+        .eq("id", str(relationship_id))
+        .execute()
+    ).data
+
+    if not relationship_data:
+        raise HTTPException(status_code=404, detail="❌ Relationship not found")
+    
+    return relationship_data[0].get("user_texting_style")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)  

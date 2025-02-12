@@ -1,32 +1,89 @@
 import uuid
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 
-# ✅ Fix target_id: int -> target_id: uuid.UUID
-class LoveAnalysisCreate(BaseModel):
-    convo: str
-    target_id: uuid.UUID  # Changed from int to UUID
+# ✅ Fix Recipient_id: int -> Recipient_id: uuid.UUID
+class UserCreate(BaseModel):
+    name: str
+    gender: Optional[str] = None
+    age: Optional[str] = None
+    language: Optional[str] = None
+    about_me: Optional[str] = None
 
-class LoveAnalysisOut(BaseModel):
-    content: str
+class UserOut(BaseModel):
+    id: uuid.UUID  # Changed from int to UUID
+    name: str
+    gender: Optional[str] = None
+    age: Optional[str] = None
+    language: Optional[str] = None
+    about_me: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class UserUpdate(BaseModel):
+    name: str
+
+class UserUpdateOut(BaseModel):
+    pass
+class RecipientBase(BaseModel):
+    name: Optional[str] = None
+    gender: Optional[str] = None
+    age: Optional[str] = None
+    about_me: Optional[str] = None
+    language: Optional[str] = None
+
+
+class RecipientCreate(RecipientBase): # Changed from int to UUID
+    user_id: uuid.UUID
+    pass
+
+class RecipientUpdate(RecipientBase):
+
+    pass
+class RecipientUpdateOut(BaseModel):
+    pass
+class RecipientOut(RecipientBase):
+    relationship_id: Optional[uuid.UUID]  = None # Changed from int to UUI`
+    id: Optional[uuid.UUID] = None # Changed from int to UUID
 
     class Config:
         from_attributes = True
 
 class ConversationSnippetCreate(BaseModel):
-    convo: str
-    target_id: uuid.UUID  # Changed from int to UUID
+    conversation_id: Optional[str] = None  # If None, create a new conversation
+    relationship_id: str
+    sequence_id: Optional[int] = None
+    content: str
+    image_url: Optional[str] = None
+    uploaded_at: Optional[datetime] = None
 
 class ConversationSnippetOut(BaseModel):
-    content: str
+    conversation_id: str
+    sequence_id: Optional[int] = None
+    image_url: Optional[str] = None
+    uploaded_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+class ConversationCreate(BaseModel):
+    relationship_id: str
+    topic: Optional[str] = "New Conversation"
+    conversation_history: Optional[str] = ""
+    conversation_summary: Optional[str] = ""
+    content: str
+    last_updated: Optional[datetime] = datetime.utcnow()
+
+class ConversationOut(BaseModel):
+    id: str
+    relationship_id: str
+    topic: str
+    conversation_history: str
+    conversation_summary: str
+    last_updated: datetime
+
 class PersonaCreate(BaseModel):
     name : str
     description : str
     gender : str
-
 
 class PersonaOut(BaseModel):
     id : uuid.UUID
@@ -34,51 +91,46 @@ class PersonaOut(BaseModel):
     description : str
     gender : str
 
+class ReplySuggestionCreate(BaseModel):
+    option : int
+    relationship_id: uuid.UUID  # ✅ Ensures relationship exists
+    conversation_id: uuid.UUID  # ✅ Ensures conversation exists
+    persona_id: uuid.UUID # ✅ Links response to a persona
 
-class StyleCreate(BaseModel):
-    convo: str
-    target_id: uuid.UUID  # Changed from int to UUID
+class ReplySuggestionOut(BaseModel):
 
-class Style(StyleCreate):
-    content: str
-
-
-class ChatStrategyCreate(BaseModel):
-    target_id: uuid.UUID  # Changed from int to UUID
-
-class ChatStrategyOut(BaseModel):
-    content: str
+    reply_1: str
+    reply_2: str
+    reply_3: str
+    reply_4: str
 
 
-class ReplyOptionsCreate(BaseModel):
-    target_id: uuid.UUID  # Changed from int to UUID
-    persona_id: uuid.UUID  # Changed from int to UUID
-    
+class ConversationAnalysisCreate(BaseModel):
+    conversation_id: str
+    relationship_id: str
 
-class ReplyOptionsOut(BaseModel):
-    option1: str
-    option2: str
-    option3: str
-    option4: str
-
-
-class TargetBase(BaseModel):
-    name: str
-    gender: Optional[str] = None
-    relationship_context: Optional[str] = None
-    relationship_perception: Optional[str] = None
-    relationship_goals: Optional[str] = None
-    relationship_goals_long: Optional[str] = None
-    personality: Optional[str] = None
-    language: Optional[str] = None
+class ConversationAnalysisOut(BaseModel):
+    user_communication_style: str
+    user_personality: str
+    recipient_communication_style: str
+    recipient_personality: str
+    relationship_stage: str
+    relationship_trend: str
 
 
-class TargetCreate(TargetBase):
-    pass
+class ConversationSummaryOut(BaseModel):
+    conversation_id: str
+    conversation_summary: str
+    topic: str
+
+class RelationshipOverviewOut(BaseModel):
+    relationship_stage_overview: str
+    relationship_trend_overview: str
+    user_personality_overview: str
+    user_communication_style_overview: str
+    recipient_personality_overview: str
+    recipient_communication_style_overview: str
 
 
-class TargetOut(TargetBase):
-    id: uuid.UUID  # Changed from int to UUID
-
-    class Config:
-        from_attributes = True
+class UserTextingStyleOut(BaseModel):
+    user_texting_style: str
