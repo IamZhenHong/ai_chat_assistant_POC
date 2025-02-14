@@ -35,7 +35,6 @@ def update_user_texting_style(conversation_history:str, relationship_id:uuid.UUI
     if not relationship:
         return {"status": "error", "message": "Relationship not found."}
 
-
     system_prompt = f"""
     Given the conversation history, update the user's texting style:
 
@@ -122,8 +121,6 @@ def update_relationship_overview(data: dict):
     
     response = completion.choices[0].message.parsed
 
-
-
     try:
         # Perform the update in Supabase
         update_response = (
@@ -188,8 +185,6 @@ def summarize_conversation(text: str, conversation_id: uuid.UUID):
     ).eq("id", str(conversation_id)).execute()  # Ensures only the row with matching id is updated
 
     print(update_response)
-
-    print("CONVERSATION ID !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", conversation_id)
 
     time.sleep(5)  # Simulating processing delay
     return {"status": "success", "conversation_id": str(conversation_id)}

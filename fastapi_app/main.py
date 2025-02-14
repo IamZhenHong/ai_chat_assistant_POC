@@ -1,71 +1,79 @@
-from fastapi import FastAPI, Depends, HTTPException
-from sqlalchemy.orm import Session
-from . import models, schemas
-from openai import OpenAI
-import os
-from dotenv import load_dotenv
-from sqlalchemy import desc
-import json
-from typing import List
-import os
-from supabase import create_client, Client
-import uuid
-from sqlalchemy import create_engine
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import create_engine, desc
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from typing import List
 import urllib.parse
-import psycopg2
+import os
+import uuid
 from datetime import datetime
-import uvicorn
+from dotenv import load_dotenv
+from supabase import create_client, Client
+from openai import OpenAI
 from celery import Celery
-import time
-from fastapi import FastAPI, BackgroundTasks
 from celery.result import AsyncResult
+from fastapi.middleware.cors import CORSMiddleware
+from . import models, schemas
 from .worker import summarize_conversation, update_relationship_overview, update_user_texting_style
+
 # Load environment variables
 load_dotenv()
 
-url: str = os.environ.get("SUPABASE_URL")
-key: str = os.environ.get("SUPABASE_KEY")
-if not url or not key:
+# Supabase Configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_PASSWORD = os.getenv("SUPABASE_PASSWORD")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Missing SUPABASE_URL or SUPABASE_KEY in environment variables.")
-supabase: Client = create_client(url, key)
-openai_api_key = os.getenv("OPENAI_API_KEY")
 
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# OpenAI Configuration
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI()
-# ✅ Extract host and set port
-host = f"db.{url.split('//')[1]}"
-port = 5432  # Supabase default
 
-# ✅ URL Encode the Password
-password = os.environ.get("SUPABASE_PASSWORD")
-encoded_password = urllib.parse.quote(password, safe="")
-
-# ✅ Construct SQLAlchemy connection URL
+# Database Configuration
+encoded_password = urllib.parse.quote(SUPABASE_PASSWORD, safe="")
 DATABASE_URL = f"postgresql://postgres.rgwighbhilwimfpmrcak:{encoded_password}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
 engine = create_engine(DATABASE_URL, echo=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Test Database Connection
 try:
     with engine.connect() as connection:
         print("✅ Successfully connected to Supabase PostgreSQL!")
 except Exception as e:
     print(f"❌ SQLAlchemy Connection Error: {e}")
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# ✅ Define the Base model class
+# Define Base Model
 Base = declarative_base()
-
 Base.metadata.create_all(bind=engine)
 
-# Celery setup with Redis
+# Celery Configuration
 celery_app = Celery(
     "worker",
-    broker="redis://localhost:6379/0",  # Redis as the message broker
-    backend="redis://localhost:6379/0",  # Redis to store results
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/0",
 )
 
+# FastAPI App Setup
 app = FastAPI()
+
+# CORS Configuration
+origins = [
+    "https://b886-60-50-200-107.ngrok-free.app",  # ✅ Deployed Streamlit app
+    "https://91d4-128-106-187-4.ngrok-free.app ",  # ✅ Ngrok FastAPI URL
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.post("/users/", response_model=schemas.UserOut)
 def create_user(user: schemas.UserCreate):
@@ -192,13 +200,10 @@ def update_recipient(recipient_id: uuid.UUID, updated_recipient: schemas.Recipie
 def create_conversation_snippets(conversation_snippets: List[schemas.ConversationSnippetCreate]):
     if not conversation_snippets:
         raise HTTPException(status_code=400, detail="❌ No snippets provided.")
+    
     conversation_id = str(uuid.uuid4())
-
-    conversation_history = ""
-    for snippet in conversation_snippets:
-        conversation_history += f"{snippet.content}\n"
-
-
+    conversation_history = "\n".join(snippet.content for snippet in conversation_snippets)
+    
     new_conversation = {
         "id": conversation_id,
         "relationship_id": str(conversation_snippets[0].relationship_id),
@@ -207,31 +212,30 @@ def create_conversation_snippets(conversation_snippets: List[schemas.Conversatio
         "conversation_summary": "",
         "last_updated": datetime.utcnow().isoformat(),
     }
-    print("conversation_id", conversation_id)
+    
     supabase.table("conversations").insert(new_conversation).execute()
-
-    summary = summarize_conversation.apply_async(args=[conversation_history, conversation_id], countdown=10)
-    update_user_texting_style.apply_async(args=[conversation_history,conversation_snippets[0].relationship_id], countdown=10)
-
-    # ✅ Insert multiple snippets under the conversation
-    snippets_data = []
-    for snippet in conversation_snippets:
-        snippets_data.append({
+    
+    summarize_conversation.apply_async(args=[conversation_history, conversation_id], countdown=10)
+    update_user_texting_style.apply_async(args=[conversation_history, conversation_snippets[0].relationship_id], countdown=10)
+    
+    snippets_data = [
+        {
             "id": str(uuid.uuid4()),
             "conversation_id": conversation_id,
             "sequence_id": snippet.sequence_id,
             "content": snippet.content,
             "image_url": snippet.image_url,
             "uploaded_at": datetime.utcnow().isoformat(),
-        })
+        }
+        for snippet in conversation_snippets
+    ]
     
     response = supabase.table("conversation_snippets").insert(snippets_data).execute()
     if not response.data:
         raise HTTPException(status_code=500, detail="❌ Failed to insert conversation snippets.")
+    
+    return {"conversation_id": conversation_id}
 
-    return {
-        "conversation_id": conversation_id,
-    }
 
 @app.post("/persona/", response_model=schemas.PersonaOut)
 def create_persona(persona: schemas.PersonaCreate):
@@ -259,61 +263,51 @@ def create_conversation_analysis(conversation_analysis: schemas.ConversationAnal
     if not conversation_analysis.conversation_id:
         raise HTTPException(status_code=400, detail="Conversation ID is required")
     
-    relationship_data = (
-        supabase.table("relationships")
-        .select("*")
-        .eq("id", str(conversation_analysis.relationship_id))
-        .execute()
-    ).data
-    
-    conversation_history = (
-        supabase.table("conversations")
-        .select("conversation_history")
-        .eq("id", str(conversation_analysis.conversation_id))
-        .execute()
-    ).data
-
-    if not conversation_history:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    
+    # Fetch relationship data
+    relationship_data = supabase.table("relationships").select("*").eq("id", str(conversation_analysis.relationship_id)).execute().data
     if not relationship_data:
         raise HTTPException(status_code=404, detail="Relationship not found")
     
-    recipient_personality = relationship_data[0].get("recipient_personality_overview", "Unknown")
-    recipient_communication_style = relationship_data[0].get("recipient_communication_style_overview", "Unknown")
-
+    relationship = relationship_data[0]
+    
+    # Fetch conversation history
+    conversation_history = supabase.table("conversations").select("conversation_history").eq("id", str(conversation_analysis.conversation_id)).execute().data
+    if not conversation_history:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    
+    conversation_text = conversation_history[0].get("conversation_history", "Unknown")
+    recipient_personality = relationship.get("recipient_personality_overview", "Unknown")
+    recipient_communication_style = relationship.get("recipient_communication_style_overview", "Unknown")
+    
+    # Fetch recipient language
+    recipient_language_data = supabase.table("recipients").select("language").eq("id", relationship.get("recipient_id")).execute().data
+    recipient_language = recipient_language_data[0].get("language", "English") if recipient_language_data else "English"
+    
     system_prompt = f"""
     Analyze the conversation based on:
-    - Relationship Goal: {relationship_data[0].get('relationship_goal', 'Unknown')}
+    - Relationship Goal: {relationship.get('relationship_goal', 'Unknown')}
     - Recipient Personality: {recipient_personality}
     - Recipient Communication Style: {recipient_communication_style}
-    - Conversation History: {conversation_history[0].get('conversation_history', 'Unknown')}
-
-    Be comprehensive and detailed
+    - Conversation History: {conversation_text}
+    
+    Be comprehensive and detailed.
     """
-
-    recipient_language = (
-        supabase.table("recipients")
-        .select("language")
-        .eq("id", relationship_data[0].get("recipient_id"))
-        .execute()
-    )
-
+    
     try:
         completion = client.beta.chat.completions.parse(
             model="gpt-4o",
             store=True,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"""Output in {recipient_language}: """},
+                {"role": "user", "content": f"Output in {recipient_language}: "},
             ],
             response_format=schemas.ConversationAnalysisOut
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ GPT-4o API error: {str(e)}")
-
+    
     analysis_results = completion.choices[0].message.parsed
-
+    
     new_conversation_analysis = {
         "id": str(uuid.uuid4()),
         "conversation_id": str(conversation_analysis.conversation_id),
@@ -325,7 +319,7 @@ def create_conversation_analysis(conversation_analysis: schemas.ConversationAnal
         "relationship_trend": analysis_results.relationship_trend,
         "generated_at": datetime.utcnow().isoformat(),
     }
-
+    
     conversation_analysis_update = {
         "relationship_id": str(conversation_analysis.relationship_id),
         "relationship_stage": analysis_results.relationship_stage,
@@ -336,22 +330,11 @@ def create_conversation_analysis(conversation_analysis: schemas.ConversationAnal
         "recipient_communication_style": analysis_results.recipient_communication_style,
         "updated_at": datetime.utcnow().isoformat(),
     }
-
+    
     update_relationship_overview.apply_async(args=[conversation_analysis_update], countdown=10)
-    response = supabase.table("conversation_analyses").insert(new_conversation_analysis).execute()
-
-    return schemas.ConversationAnalysisOut(
-        user_communication_style=analysis_results.user_communication_style,
-        user_personality=analysis_results.user_personality,
-        recipient_communication_style=analysis_results.recipient_communication_style,
-        recipient_personality=analysis_results.recipient_personality,
-        relationship_stage=analysis_results.relationship_stage,
-        relationship_trend=analysis_results.relationship_trend,
-    )
-from fastapi import HTTPException
-import uuid
-from datetime import datetime
-import os
+    supabase.table("conversation_analyses").insert(new_conversation_analysis).execute()
+    
+    return schemas.ConversationAnalysisOut(**analysis_results)
 
 @app.post("/reply_suggestions/", response_model=schemas.ReplySuggestionOut)
 def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
@@ -362,8 +345,6 @@ def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
     # ✅ Validate required fields
     if not reply_suggestion.conversation_id:
         raise HTTPException(status_code=400, detail="❌ conversation_id is required")
-    if not reply_suggestion.persona_id:
-        raise HTTPException(status_code=400, detail="❌ persona_id is required")
 
     # ✅ Fetch relationship data
     print(f"🔹 Fetching relationship data for ID: {reply_suggestion.relationship_id}")
@@ -380,15 +361,22 @@ def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
     relationship = relationship_data[0]
     print("✅ Relationship data found")
 
+    persona_id  =str(reply_suggestion.persona_id) if reply_suggestion.persona_id else None
+
+    if persona_id:
+        uuid.UUID(persona_id)
+
     # ✅ Determine user texting style
     if reply_suggestion.option == 1:
         user_texting_style = relationship.get("user_texting_style", "Normal")
     elif reply_suggestion.option == 2:
+        user_texting_style = relationship.get("recipient_communication_style_overview", "Normal")
+    elif reply_suggestion.option == 3:
         print(f"🔹 Fetching persona data for ID: {reply_suggestion.persona_id}")
         persona_data = (
             supabase.table("personas")
             .select("*")
-            .eq("id", str(reply_suggestion.persona_id))
+            .eq("id", persona_id)
             .execute()
         ).data
 
@@ -430,8 +418,6 @@ def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
 
     print("🔹 Sending request to OpenAI with prompt...")
 
-
-
     try:
         completion = client.beta.chat.completions.parse(
             model="gpt-4o",
@@ -455,7 +441,7 @@ def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
     new_reply_suggestion = {
         "id": str(uuid.uuid4()),
         "conversation_id": str(reply_suggestion.conversation_id),
-        "persona_id": str(reply_suggestion.persona_id),
+        "persona_id": str(reply_suggestion.persona_id) if reply_suggestion.persona_id else None,
         "reply_1": options.reply_1,
         "reply_2": options.reply_2,
         "reply_3": options.reply_3,

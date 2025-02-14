@@ -7,45 +7,61 @@ from datetime import datetime
 class UserCreate(BaseModel):
     name: str
     gender: Optional[str] = None
-    age: Optional[str] = None
+    age: Optional[int] = None  # Assuming age should be an integer
     language: Optional[str] = None
     about_me: Optional[str] = None
 
 class UserOut(BaseModel):
-    id: uuid.UUID  # Changed from int to UUID
+    id: uuid.UUID  # Ensuring consistency with UUID
     name: str
     gender: Optional[str] = None
-    age: Optional[str] = None
+    age: Optional[int] = None
     language: Optional[str] = None
     about_me: Optional[str] = None
+    created_at: datetime  # Added for better response tracking
+    updated_at: Optional[datetime] = None  # Useful for tracking modifications
+
     class Config:
         from_attributes = True
 
 class UserUpdate(BaseModel):
+    name: Optional[str] = None  # Allow partial updates
+    gender: Optional[str] = None
+    age: Optional[int] = None
+    language: Optional[str] = None
+    about_me: Optional[str] = None
+
+class UserUpdateOut(UserOut): 
     name: str
 
-class UserUpdateOut(BaseModel):
-    pass
+from pydantic import BaseModel
+from typing import Optional
+import uuid
+
 class RecipientBase(BaseModel):
+    """Base model for recipient data."""
     name: Optional[str] = None
     gender: Optional[str] = None
     age: Optional[str] = None
     about_me: Optional[str] = None
     language: Optional[str] = None
 
-
-class RecipientCreate(RecipientBase): # Changed from int to UUID
-    user_id: uuid.UUID
-    pass
+class RecipientCreate(RecipientBase):
+    """Model for creating a new recipient."""
+    user_id: uuid.UUID  # Changed from int to UUID
 
 class RecipientUpdate(RecipientBase):
+    """Model for updating recipient data."""
+    pass
 
-    pass
 class RecipientUpdateOut(BaseModel):
+    """Model for response after updating a recipient."""
     pass
+
 class RecipientOut(RecipientBase):
-    relationship_id: Optional[uuid.UUID]  = None # Changed from int to UUI`
-    id: Optional[uuid.UUID] = None # Changed from int to UUID
+    """Model for retrieving recipient details."""
+    relationship_id: Optional[uuid.UUID] = None  # Changed from int to UUID
+    id: Optional[uuid.UUID] = None  # Changed from int to UUID
 
     class Config:
         from_attributes = True
@@ -95,7 +111,7 @@ class ReplySuggestionCreate(BaseModel):
     option : int
     relationship_id: uuid.UUID  # ✅ Ensures relationship exists
     conversation_id: uuid.UUID  # ✅ Ensures conversation exists
-    persona_id: uuid.UUID # ✅ Links response to a persona
+    persona_id: Optional[uuid.UUID] = None  # ✅ Ensures persona exists
 
 class ReplySuggestionOut(BaseModel):
 
