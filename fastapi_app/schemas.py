@@ -2,6 +2,7 @@ import uuid
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+from typing import List
 
 # ✅ Fix Recipient_id: int -> Recipient_id: uuid.UUID
 class UserCreate(BaseModel):
@@ -67,7 +68,8 @@ class RecipientOut(RecipientBase):
         from_attributes = True
 
 class ConversationSnippetCreate(BaseModel):
-    conversation_id: Optional[str] = None  # If None, create a new conversation
+    user_id: str
+    recipient_id: str
     relationship_id: str
     sequence_id: Optional[int] = None
     content: str
@@ -112,6 +114,7 @@ class ReplySuggestionCreate(BaseModel):
     relationship_id: uuid.UUID  # ✅ Ensures relationship exists
     conversation_id: uuid.UUID  # ✅ Ensures conversation exists
     persona_id: Optional[uuid.UUID] = None  # ✅ Ensures persona exists
+    use_memory : bool
 
 class ReplySuggestionOut(BaseModel):
 
@@ -150,3 +153,14 @@ class RelationshipOverviewOut(BaseModel):
 
 class UserTextingStyleOut(BaseModel):
     user_texting_style: str
+
+
+class GptConversationOut(BaseModel):
+    sender_name: str
+    recipient_name: str
+    sender_messages: List[str]
+    recipient_messages: List[str]
+
+
+class GptMemoryQueryOut(BaseModel):
+    query: str

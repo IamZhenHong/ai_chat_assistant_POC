@@ -15,7 +15,13 @@ from celery.result import AsyncResult
 from fastapi.middleware.cors import CORSMiddleware
 from . import models, schemas
 from .worker import summarize_conversation, update_relationship_overview, update_user_texting_style
-
+import requests
+from openai import AzureOpenAI
+import json
+import uvicorn
+import time
+import re
+import json
 # Load environment variables
 load_dotenv()
 
@@ -32,6 +38,15 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI()
+
+client = AzureOpenAI(
+  azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT"),
+  api_key= os.getenv("AZURE_OPENAI_API_KEY"),
+  api_version="2024-08-01-preview"
+)
+
+MEM0_URL = "http://192.168.11.4:18669"
+MEM0_APP_ID = 800
 
 # Database Configuration
 encoded_password = urllib.parse.quote(SUPABASE_PASSWORD, safe="")
@@ -202,13 +217,53 @@ def create_conversation_snippets(conversation_snippets: List[schemas.Conversatio
         raise HTTPException(status_code=400, detail="❌ No snippets provided.")
     
     conversation_id = str(uuid.uuid4())
-    conversation_history = "\n".join(snippet.content for snippet in conversation_snippets)
     
+    conversation_history = "\n".join(snippet.content for snippet in conversation_snippets)
+
+    prompt = f"""
+    You are an expert at structuring chat histories into JSON format.
+
+    Given the following chat history:
+
+    {conversation_history}
+
+    Extract the structured format as a JSON array where each message follows this format:
+    [
+        {{"name": "sender_name", "content": "message_content"}},
+        {{"name": "recipient_name", "content": "message_content"}}
+    ]
+
+    Ensure:
+    - The output is valid JSON.
+    - No extra explanations, only return raw JSON.
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": "You are a helpful assistant that formats chat logs into structured data."},
+                  {"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    response_text = response.choices[0].message.content.strip()
+
+    # Remove Markdown-style triple backticks
+    response_text = re.sub(r"```json\n(.*?)\n```", r"\1", response_text, flags=re.DOTALL)
+
+    # Ensure valid JSON formatting
+    try:
+        formatted_conversation_history = json.loads(response_text)
+    except json.JSONDecodeError:
+        print("Error: GPT response was not valid JSON. Raw response:")
+        print(response_text)
+        return []
+
+  
     new_conversation = {
         "id": conversation_id,
         "relationship_id": str(conversation_snippets[0].relationship_id),
         "topic": "New Conversation",
-        "conversation_history": conversation_history,
+        "conversation_history": [formatted_conversation_history],
         "conversation_summary": "",
         "last_updated": datetime.utcnow().isoformat(),
     }
@@ -229,13 +284,46 @@ def create_conversation_snippets(conversation_snippets: List[schemas.Conversatio
         }
         for snippet in conversation_snippets
     ]
+
+
+
+
+
+    recipient_name = supabase.table("recipients").select("name").eq("id", conversation_snippets[0].recipient_id).execute().data[0].get("name", "Unknown")
+
+    user_name = supabase.table("users").select("name").eq("id", conversation_snippets[0].user_id).execute().data[0].get("name", "Unknown")
+
+
+    # Define the request payload
+    payload = {
+        "user_id": user_name,
+        "app_id": str(MEM0_APP_ID),
+        "memory": formatted_conversation_history,
+        "character_name": recipient_name
+    }
+
+    print(payload)
+    # Define headers
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+    # Make the POST request
+    response = requests.post(f"{MEM0_URL}/api/add_memory", json=payload, headers=headers)
+
+    # Print the response
+    print(response.status_code)
+    print(response.json())  # Assuming the response is in JSON format
+
+    if(response.status_code != 200):
+        raise HTTPException(status_code=500, detail="❌ Failed to upload conversation history to Mem0.")
+    
     
     response = supabase.table("conversation_snippets").insert(snippets_data).execute()
     if not response.data:
         raise HTTPException(status_code=500, detail="❌ Failed to insert conversation snippets.")
-    
     return {"conversation_id": conversation_id}
-
 
 @app.post("/persona/", response_model=schemas.PersonaOut)
 def create_persona(persona: schemas.PersonaCreate):
@@ -276,6 +364,66 @@ def create_conversation_analysis(conversation_analysis: schemas.ConversationAnal
         raise HTTPException(status_code=404, detail="Conversation not found")
     
     conversation_text = conversation_history[0].get("conversation_history", "Unknown")
+
+    response = client.beta.chat.completions.parse(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You analyze conversation history and generate only relevant database queries in natural language. "
+                    "Do not include explanations, just the queries."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"""
+                Based on the following conversation, generate one natural language query
+                to retrieve useful context from the database. Answer in {relationship.get('language', 'English')}.
+                
+                Conversation history:
+                {conversation_text}
+
+
+                """
+            }
+        ],
+        response_format=schemas.GptMemoryQueryOut
+    )
+
+
+    query = response.choices[0].message.parsed
+
+    print("Wuries",query)
+
+
+    user_id = supabase.table("users").select("name").eq("id", relationship.get("user_id")).execute().data[0].get("name", "Unknown")
+    recipient_id = supabase.table("recipients").select("name").eq("id", relationship.get("recipient_id")).execute().data[0].get("name", "Unknown")
+    print(user_id)
+    print(recipient_id)
+        # user_name = supabase.table("users").select("name").eq("id", conversation_snippets[0].user_id).execute().data[0].get("name", "Unknown")
+
+
+    payload = {
+        "user_id": user_id,
+        "app_id": str(MEM0_APP_ID),
+        "query": query.query,
+        "character_name": recipient_id
+    }
+
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(f"{MEM0_URL}/api/search_memory", json=payload, headers=headers)
+
+    print(response.json()['data']['memory'])
+    retrieved_memory = response.json()['data']['memory']
+    compiled_memory = " ".join(retrieved_memory)  # Join list elements into a single string
+
+    print("Compiled retrieved memory",compiled_memory)  # Output the final result
+
     recipient_personality = relationship.get("recipient_personality_overview", "Unknown")
     recipient_communication_style = relationship.get("recipient_communication_style_overview", "Unknown")
     
@@ -290,6 +438,8 @@ def create_conversation_analysis(conversation_analysis: schemas.ConversationAnal
     - Recipient Communication Style: {recipient_communication_style}
     - Conversation History: {conversation_text}
     
+    Additional Context (If relevant):
+    Memory related to conversation ; {compiled_memory}
     Be comprehensive and detailed.
     """
     
@@ -334,13 +484,21 @@ def create_conversation_analysis(conversation_analysis: schemas.ConversationAnal
     update_relationship_overview.apply_async(args=[conversation_analysis_update], countdown=10)
     supabase.table("conversation_analyses").insert(new_conversation_analysis).execute()
     
-    return schemas.ConversationAnalysisOut(**analysis_results)
+    return analysis_results
+
+import time
+from datetime import datetime
 
 @app.post("/reply_suggestions/", response_model=schemas.ReplySuggestionOut)
 def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
     """Generates AI-powered reply suggestions based on conversation context and persona."""
+    
+    start_time = time.time()  # Track total execution time
+    step_times = {}
 
     print(f"🔹 Received request: {reply_suggestion.dict()}")
+    
+    step_times["request_received"] = time.time() - start_time  # Track time taken
 
     # ✅ Validate required fields
     if not reply_suggestion.conversation_id:
@@ -348,76 +506,108 @@ def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
 
     # ✅ Fetch relationship data
     print(f"🔹 Fetching relationship data for ID: {reply_suggestion.relationship_id}")
+    relationship_start = time.time()  # Track step time
     relationship_data = (
         supabase.table("relationships")
         .select("*")
         .eq("id", str(reply_suggestion.relationship_id))
         .execute()
     ).data
+    step_times["fetch_relationship"] = time.time() - relationship_start
 
     if not relationship_data:
         raise HTTPException(status_code=404, detail="❌ Relationship not found")
 
     relationship = relationship_data[0]
-    print("✅ Relationship data found")
-
-    persona_id  =str(reply_suggestion.persona_id) if reply_suggestion.persona_id else None
-
-    if persona_id:
-        uuid.UUID(persona_id)
-
-    # ✅ Determine user texting style
-    if reply_suggestion.option == 1:
-        user_texting_style = relationship.get("user_texting_style", "Normal")
-    elif reply_suggestion.option == 2:
-        user_texting_style = relationship.get("recipient_communication_style_overview", "Normal")
-    elif reply_suggestion.option == 3:
-        print(f"🔹 Fetching persona data for ID: {reply_suggestion.persona_id}")
-        persona_data = (
-            supabase.table("personas")
-            .select("*")
-            .eq("id", persona_id)
-            .execute()
-        ).data
-
-        if not persona_data:
-            raise HTTPException(status_code=404, detail="❌ Persona not found")
-
-        user_texting_style = persona_data[0].get("description", "Normal")
-    else:
-        user_texting_style = "Normal"
-
-    print(f"✅ Determined user texting style: {user_texting_style}")
+    print("✅ Relationship data found", relationship)
 
     # ✅ Fetch conversation data
     print(f"🔹 Fetching conversation data for ID: {reply_suggestion.conversation_id}")
+    conversation_start = time.time()
     conversation_data = (
         supabase.table("conversations")
         .select("*")
         .eq("id", str(reply_suggestion.conversation_id))
         .execute()
     ).data
+    step_times["fetch_conversation"] = time.time() - conversation_start
 
     if not conversation_data:
         raise HTTPException(status_code=404, detail="❌ Conversation not found")
 
     conversation = conversation_data[0]
 
-    print("✅ Conversation data found")
+    compiled_memory =""
 
-    # ✅ Construct System Prompt
+    if (reply_suggestion.use_memory == True):
+    # ✅ Generate query for memory search
+        query_start = time.time()
+        response = client.beta.chat.completions.parse(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You analyze conversation history and generate only relevant database queries in natural language. "
+                        "Do not include explanations, just the queries."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"""
+                    Based on the following conversation, generate one natural language query
+                    to retrieve useful context from the database. Answer in {relationship.get('language', 'English')}.
+                    
+                    Conversation history:
+                    {conversation.get('conversation_history')}
+                    """
+                }
+            ],
+            response_format=schemas.GptMemoryQueryOut
+        )
+        step_times["generate_query"] = time.time() - query_start
+
+        query = response.choices[0].message.parsed
+        print("🔹 Generated query:", query)
+
+        # ✅ Memory search request
+        memory_search_start = time.time()
+        payload = {
+            "user_id": relationship.get("user_id"),
+            "app_id": str(MEM0_APP_ID),
+            "query": query.query,
+            "character_name": relationship.get("recipient_id")
+        }
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json"
+        }
+
+        memory_response = requests.post(f"{MEM0_URL}/api/search_memory", json=payload, headers=headers)
+        step_times["memory_search"] = time.time() - memory_search_start
+
+        retrieved_memory = memory_response.json().get('data', {}).get('memory', [])
+        compiled_memory = " ".join(retrieved_memory)
+
+        print("🔹 Compiled retrieved memory:", compiled_memory)
+    
+    # ✅ Construct system prompt
+    system_prompt_start = time.time()
     system_prompt = f"""
     Suggest replies based on:
     - Relationship Goal: {relationship.get('relationship_goal', 'Unknown')}
     - Recipient Personality: {relationship.get('recipient_personality_overview', 'Unknown')}
     - Recipient Communication Style: {relationship.get('recipient_communication_style_overview', 'Unknown')}
     - Conversation History: {conversation.get('conversation_history', 'Unknown')}
-    - User Texting Style: {user_texting_style}
+    - User Texting Style: {relationship.get('user_texting_style', 'Normal')}
 
+    Additional context (if relevant):
+    - Retrieved Memory: {compiled_memory}
     """
+    step_times["construct_prompt"] = time.time() - system_prompt_start
 
-    print("🔹 Sending request to OpenAI with prompt...")
-
+    # ✅ Send request to OpenAI
+    openai_start = time.time()
     try:
         completion = client.beta.chat.completions.parse(
             model="gpt-4o",
@@ -425,19 +615,22 @@ def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Output in {relationship.get('language', 'English')}: "},
             ],
-            response_format= schemas.ReplySuggestionOut
+            response_format=schemas.ReplySuggestionOut
         )
         print("✅ OpenAI response received")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ GPT-4o API error: {str(e)}")
+    step_times["openai_request"] = time.time() - openai_start
 
-    # ✅ Ensure OpenAI response is valid
-    
+    # ✅ Parse AI response
+    response_parse_start = time.time()
     options = completion.choices[0].message.parsed
+    step_times["parse_response"] = time.time() - response_parse_start
 
     print(f"✅ Parsed reply suggestions: {options}")
 
-    # ✅ Prepare new reply suggestion entry
+    # ✅ Insert reply into database
+    db_insert_start = time.time()
     new_reply_suggestion = {
         "id": str(uuid.uuid4()),
         "conversation_id": str(reply_suggestion.conversation_id),
@@ -449,14 +642,20 @@ def create_reply_suggestion(reply_suggestion: schemas.ReplySuggestionCreate):
         "created_at": datetime.utcnow().isoformat(),
     }
 
-    print(f"🔹 Inserting reply suggestion into Supabase: {new_reply_suggestion}")
-
-    # ✅ Insert into Supabase with error handling
     try:
         response = supabase.table("reply_suggestions").insert(new_reply_suggestion).execute()
         print("✅ Supabase insertion successful")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ Database error: {str(e)}")
+    step_times["insert_db"] = time.time() - db_insert_start
+
+    # ✅ Calculate total execution time
+    step_times["total_execution"] = time.time() - start_time
+
+    # ✅ Print step times
+    print("\n⏳ Execution Time Breakdown:")
+    for step, duration in step_times.items():
+        print(f"🕒 {step}: {duration:.4f} seconds")
 
     # ✅ Return response
     return schemas.ReplySuggestionOut(
