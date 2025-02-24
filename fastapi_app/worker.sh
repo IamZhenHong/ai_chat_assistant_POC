@@ -1,0 +1,1 @@
+celery -A fastapi_app.worker worker --loglevel=info
