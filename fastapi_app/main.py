@@ -68,7 +68,7 @@ Base.metadata.create_all(bind=engine)
 # Celery Configuration
 celery_app = Celery(
     "worker",
-    broker="redis://localhost:6379/0",
+    broker="redis://red-cuu1fk23esus73ee6ahg:6379",
     backend="redis://localhost:6379/0",
 )
 

@@ -14,8 +14,8 @@ load_dotenv()
 # Celery setup with Redis
 celery_app = Celery(
     "worker",
-    broker="redis://localhost:6379/0",  # Redis as the message broker
-    backend="redis://localhost:6379/0",  # Redis to store results
+    broker="redis://red-cuu1fk23esus73ee6ahg:6379",  # Redis as the message broker
+    backend="https://dashboard.render.com/web/srv-cuu1enij1k6c738h9t40/deploys/dep-cuu1j68gph6c73b7k960",  # Redis to store results
 )
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
