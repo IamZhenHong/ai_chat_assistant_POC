@@ -1,0 +1,15 @@
+# Use the same Python base image
+FROM python:3.12
+
+# Set working directory
+WORKDIR /app
+
+# Copy dependencies first
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all app files
+COPY . .
+
+# Start Celery worker
+CMD ["celery", "-A", "fastapi_app.worker", "worker", "--loglevel=info"]

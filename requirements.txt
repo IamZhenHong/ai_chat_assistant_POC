@@ -8,3 +8,4 @@ psycopg2==2.9.10
 supabase
 celery
 requests
+redis==4.5.5

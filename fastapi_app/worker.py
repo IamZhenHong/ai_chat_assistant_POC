@@ -12,10 +12,12 @@ from datetime import datetime
 
 load_dotenv()
 # Celery setup with Redis
+
+REDIS_URL = os.environ.get("REDIS_URL")
+
 celery_app = Celery(
     "worker",
-    broker="redis://red-cuu1fk23esus73ee6ahg:6379",  # Redis as the message broker
-    backend="https://dashboard.render.com/web/srv-cuu1enij1k6c738h9t40/deploys/dep-cuu1j68gph6c73b7k960",  # Redis to store results
+    broker=REDIS_URL,  # Redis as the message broker
 )
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")

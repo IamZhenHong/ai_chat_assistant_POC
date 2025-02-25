@@ -2,7 +2,7 @@ import requests
 import json
 
 # API Endpoint (Replace with the actual working API URL)
-API_URL = "http://serv-image-scan.veeka.private/green/image/scan"
+API_URL = "http://audit-image.aopacloud.private/green/image/scan"
 # Image URL with words (Replace with the actual image URL you want to scan)
 IMAGE_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3d/Lorem_Ipsum_1.png/800px-Lorem_Ipsum_1.png"
 

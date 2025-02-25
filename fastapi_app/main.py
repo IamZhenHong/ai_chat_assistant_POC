@@ -22,6 +22,7 @@ import uvicorn
 import time
 import re
 import json
+from fastapi_app.worker import celery_app  
 # Load environment variables
 load_dotenv()
 
@@ -65,12 +66,9 @@ except Exception as e:
 Base = declarative_base()
 Base.metadata.create_all(bind=engine)
 
+REDIS_URL = os.getenv("REDIS_URL")
+
 # Celery Configuration
-celery_app = Celery(
-    "worker",
-    broker="redis://red-cuu1fk23esus73ee6ahg:6379",
-    backend="redis://localhost:6379/0",
-)
 
 # FastAPI App Setup
 app = FastAPI()
