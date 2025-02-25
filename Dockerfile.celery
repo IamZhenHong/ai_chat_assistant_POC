@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Start Celery worker
-CMD ["celery", "-A", "fastapi_app.worker", "worker", "--loglevel=info"]
+CMD ["celery", "-A", "fastapi_app.worker", "worker", "--loglevel=info", "--concurrency=2"]
