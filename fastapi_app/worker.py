@@ -18,7 +18,7 @@ broker_use_ssl = {"ssl_cert_reqs": "CERT_NONE"} if REDIS_URL.startswith("rediss:
 celery_app = Celery(
     "worker",
     broker=REDIS_URL,  # Redis as the message broker
-    broker_use_ssl = brpker_use_ssl
+    broker_use_ssl = broker_use_ssl
 )
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
